@@ -6,7 +6,7 @@
  * 必须配合：TUN 开启、规则模式、UDP/TCP 53 DNS 劫持、严格路由；
  * 应用设置关闭 IPv6，浏览器关闭独立的安全 DNS。详见同目录 README.md。
  * TUN 字段由客户端设置管理，本脚本保留传入值，不重复覆写。
- * 全部普通域名（含直连网站）的解析走 sunshine-dns-break 的实际代理节点。
+ * 普通域名解析走 sunshine-dns-break；钉钉及指定资源域名例外，使用国内加密 DNS。
  * 节点域名及部分内核下载/引导请求例外：使用直连、校验证书的 DoH。
  * 本脚本不是操作系统防火墙，也不能保证 TUN 关闭后的断网保护。
  */
@@ -56,7 +56,19 @@ function main(config) {
     "https://1.12.12.12/dns-query#DIRECT"
   ];
 
-  // 整体重建，清除订阅遗留的 system、明文 fallback、国内域名直连解析策略。
+  // 钉钉业务及已确认的静态资源使用国内 DoH，避免被调度到海外入口。
+  // 资源仅匹配指定主机，不把整个 alicdn.com 加入例外。
+  const dingTalkDomains = ["dingtalk.com", "dingtalkapps.com"];
+  const dingTalkResources = ["g.alicdn.com", "at.alicdn.com", "retcode.alicdn.com", "alidocs-body.oss-cn-zhangjiakou.aliyuncs.com"];
+  const dingTalkPolicy = {};
+  dingTalkDomains.forEach(function (domain) {
+    dingTalkPolicy["+." + domain] = bootstrap.slice();
+  });
+  dingTalkResources.forEach(function (domain) {
+    dingTalkPolicy[domain] = bootstrap.slice();
+  });
+
+  // 整体重建，保留原 DNS 防护，仅添加上述钉钉例外。
   // DNS URL 的显式 #策略优先于业务分流，不受国内网站 DIRECT 规则影响。
   config.dns = {
     enable: true,
@@ -75,7 +87,8 @@ function main(config) {
     "proxy-server-nameserver": bootstrap.slice(),
     nameserver: viaProxy.slice(),
     "direct-nameserver": viaProxy.slice(),
-    "direct-nameserver-follow-policy": false
+    "nameserver-policy": dingTalkPolicy,
+    "direct-nameserver-follow-policy": true
   };
 
   // TUN 开关、协议栈、DNS 劫持、严格路由等由 Verge 的应用设置管理。
@@ -91,8 +104,14 @@ function main(config) {
     "IP-CIDR6,::/0,REJECT,no-resolve"
   ];
   const oldRules = Array.isArray(config.rules) ? config.rules : [];
-  config.rules = guardRules.concat(oldRules.filter(function (rule) {
-    return guardRules.indexOf(rule) === -1;
+  const dingTalkRules = dingTalkDomains.map(function (domain) {
+    return "DOMAIN-SUFFIX," + domain + ",DIRECT";
+  }).concat(dingTalkResources.map(function (domain) {
+    return "DOMAIN," + domain + ",DIRECT";
+  }));
+  const priorityRules = guardRules.concat(dingTalkRules);
+  config.rules = priorityRules.concat(oldRules.filter(function (rule) {
+    return priorityRules.indexOf(rule) === -1;
   }));
   return config;
 }

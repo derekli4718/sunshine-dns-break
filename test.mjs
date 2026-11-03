@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import { createContext, runInContext } from "node:vm";
 import { spawn, spawnSync } from "node:child_process";
 import { createServer } from "node:net";
+import { createServer as createHttpServer, get } from "node:http";
 import { createSocket } from "node:dgram";
 import test from "node:test";
 
@@ -32,10 +33,10 @@ test("保留节点、原业务规则和应用管理的 TUN 设置；移除遗留
   const output = apply(input);
   assert.deepEqual(output.proxies, input.proxies);
   assert.deepEqual(output["proxy-groups"][0], input["proxy-groups"][0]);
-  assert.deepEqual(output.rules.slice(3), input.rules);
+  assert.deepEqual(output.rules.slice(9), input.rules);
   assert.equal(output["mixed-port"], 7890);
   assert.equal(output.dns.fallback, undefined);
-  assert.equal(output.dns["nameserver-policy"], undefined);
+  assert.equal(output.dns["nameserver-policy"]["+.cn"], undefined);
   assert.deepEqual(output.tun, input.tun);
 });
 test("普通与直连出口的解析显式走代理；引导解析仅使用 IP 地址加密 DoH", () => {
@@ -54,6 +55,28 @@ test("普通与直连出口的解析显式走代理；引导解析仅使用 IP �
   assert.equal(output.dns.listen, "127.0.0.1:1053");
   assert.equal(output.dns.ipv6, false);
   assert.equal(output.tun, undefined); // 没有 TUN 配置时也不注入应用接管的字段。
+});
+test("钉钉 DNS 与直连规则只覆盖指定域名，且优先于订阅代理规则", () => {
+  const input = base();
+  input.rules.unshift("MATCH,fixture-proxy");
+  const output = apply(input);
+  const expected = [
+    ["+.dingtalk.com", "DOMAIN-SUFFIX,dingtalk.com,DIRECT"],
+    ["+.dingtalkapps.com", "DOMAIN-SUFFIX,dingtalkapps.com,DIRECT"],
+    ["g.alicdn.com", "DOMAIN,g.alicdn.com,DIRECT"],
+    ["at.alicdn.com", "DOMAIN,at.alicdn.com,DIRECT"],
+    ["retcode.alicdn.com", "DOMAIN,retcode.alicdn.com,DIRECT"],
+    ["alidocs-body.oss-cn-zhangjiakou.aliyuncs.com", "DOMAIN,alidocs-body.oss-cn-zhangjiakou.aliyuncs.com,DIRECT"]
+  ];
+  assert.deepEqual(Object.keys(output.dns["nameserver-policy"]), expected.map(([domain]) => domain));
+  for (const [domain] of expected) {
+    assert.deepEqual(output.dns["nameserver-policy"][domain], [
+      "https://223.5.5.5/dns-query#DIRECT", "https://1.12.12.12/dns-query#DIRECT"
+    ]);
+  }
+  assert.equal(output.dns["direct-nameserver-follow-policy"], true);
+  assert.deepEqual(output.rules.slice(3, 9), expected.map(([, rule]) => rule));
+  assert.deepEqual(output.rules.slice(9), input.rules);
 });
 test("可重复执行，组和前置拒绝规则不重复", () => {
   const first = apply(base());
@@ -157,6 +180,69 @@ async function query(port, qtype) {
     });
   } finally { socket.close(); }
 }
+test("隔离内核：钉钉按例外解析并直连，相似域名及其他 CDN 主机使用默认 DNS", { timeout: 15000 }, async () => {
+  const domestic = createSocket("udp4");
+  const ordinary = createSocket("udp4");
+  const target = createHttpServer((_request, response) => response.end("direct fixture"));
+  const lookups = new Map();
+  function answer(server, ip) {
+    server.on("message", (packet, remote) => {
+      let offset = 12;
+      const labels = [];
+      while (packet[offset]) {
+        const length = packet[offset++];
+        labels.push(packet.subarray(offset, offset + length).toString());
+        offset += length;
+      }
+      const name = labels.join(".");
+      const qtype = packet.readUInt16BE(offset + 1);
+      const header = Buffer.from(packet.subarray(0, 12));
+      header.writeUInt16BE(0x8180, 2);
+      header.writeUInt16BE(qtype === 1 ? 1 : 0, 6);
+      header.writeUInt16BE(0, 8);
+      header.writeUInt16BE(0, 10);
+      const record = Buffer.from([0xc0, 0x0c, 0, 1, 0, 1, 0, 0, 0, 30, 0, 4, ...ip]);
+      lookups.set(name, ip.join("."));
+      server.send(Buffer.concat([header, packet.subarray(12, offset + 5), ...(qtype === 1 ? [record] : [])]), remote.port, remote.address);
+    });
+  }
+  answer(domestic, [127, 0, 0, 1]);
+  answer(ordinary, [127, 0, 0, 2]);
+  try {
+    await new Promise(resolve => domestic.bind(0, "127.0.0.1", resolve));
+    await new Promise(resolve => ordinary.bind(0, "127.0.0.1", resolve));
+    await new Promise(resolve => target.listen(0, "127.0.0.1", resolve));
+    const config = apply({ ...base(), rules: ["MATCH,fixture-proxy"] });
+    config["mixed-port"] = await tcpPort();
+    // Only this isolated fixture substitutes local DNS responders for real DoH.
+    config.dns.nameserver = config.dns["direct-nameserver"] = [`127.0.0.1:${ordinary.address().port}`];
+    for (const domain of Object.keys(config.dns["nameserver-policy"])) {
+      config.dns["nameserver-policy"][domain] = [`127.0.0.1:${domestic.address().port}`];
+    }
+    await runCore(config, async ({ api, logs }) => {
+      for (const [name, ip] of [["docs.dingtalk.com", "127.0.0.1"], ["g.alicdn.com", "127.0.0.1"], ["notdingtalk.com", "127.0.0.2"], ["other.alicdn.com", "127.0.0.2"]]) {
+        const result = await api(`/dns/query?name=${name}&type=A`);
+        assert.ok(result.Answer.some(answer => answer.type === 1 && answer.data === ip));
+        assert.equal(lookups.get(name), ip);
+      }
+      const body = await new Promise((resolve, reject) => {
+        const request = get({ hostname: "127.0.0.1", port: config["mixed-port"], path: `http://docs.dingtalk.com:${target.address().port}/`, headers: { Host: `docs.dingtalk.com:${target.address().port}` }, agent: false }, response => {
+          let text = "";
+          response.on("data", chunk => { text += chunk; });
+          response.on("end", () => resolve({ text, status: response.statusCode }));
+        });
+        request.setTimeout(5000, () => request.destroy(new Error("direct fixture timed out")));
+        request.on("error", reject);
+      });
+      assert.equal(body.status, 200, logs());
+      assert.equal(body.text, "direct fixture"); // Blanket proxy rule points to closed port 1.
+    });
+  } finally {
+    domestic.close();
+    ordinary.close();
+    await new Promise(resolve => target.close(resolve));
+  }
+});
 test("隔离内核：集合内直连被过滤、Fake-IP/AAAA 正常、真实查询尝试代理且失败不回退", { timeout: 20000 }, async () => {
   const destinations = [];
   const sockets = new Set();
