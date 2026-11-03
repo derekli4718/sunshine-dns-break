@@ -6,7 +6,7 @@
  * 必须配合：TUN 开启、规则模式、UDP/TCP 53 DNS 劫持、严格路由；
  * 应用设置关闭 IPv6，浏览器关闭独立的安全 DNS。详见同目录 README.md。
  * TUN 字段由客户端设置管理，本脚本保留传入值，不重复覆写。
- * 普通域名解析走 sunshine-dns-break；钉钉及指定资源域名例外，使用国内加密 DNS。
+ * 普通域名解析走 sunshine-dns-break；钉钉、淘宝、网易及指定资源域名使用国内加密 DNS。
  * 节点域名及部分内核下载/引导请求例外：使用直连、校验证书的 DoH。
  * 本脚本不是操作系统防火墙，也不能保证 TUN 关闭后的断网保护。
  */
@@ -68,7 +68,13 @@ function main(config) {
     dingTalkPolicy[domain] = bootstrap.slice();
   });
 
-  // 整体重建，保留原 DNS 防护，仅添加上述钉钉例外。
+  // 淘宝、网易沿用订阅中的直连规则；只修正 DNS 调度到海外 CDN 的问题。
+  ["taobao.com", "163.com", "126.com", "127.net", "netease.com"].forEach(function (domain) {
+    dingTalkPolicy["+." + domain] = bootstrap.slice();
+  });
+  dingTalkPolicy["gw.alicdn.com"] = bootstrap.slice(); // 淘宝图标实际跳转的 CDN 主机。
+
+  // 整体重建，保留原 DNS 防护，仅添加上述明确列出的例外。
   // DNS URL 的显式 #策略优先于业务分流，不受国内网站 DIRECT 规则影响。
   config.dns = {
     enable: true,

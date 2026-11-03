@@ -68,7 +68,8 @@ test("钉钉 DNS 与直连规则只覆盖指定域名，且优先于订阅代理
     ["retcode.alicdn.com", "DOMAIN,retcode.alicdn.com,DIRECT"],
     ["alidocs-body.oss-cn-zhangjiakou.aliyuncs.com", "DOMAIN,alidocs-body.oss-cn-zhangjiakou.aliyuncs.com,DIRECT"]
   ];
-  assert.deepEqual(Object.keys(output.dns["nameserver-policy"]), expected.map(([domain]) => domain));
+  const domesticKeys = ["+.taobao.com", "+.163.com", "+.126.com", "+.127.net", "+.netease.com", "gw.alicdn.com"];
+  assert.deepEqual(Object.keys(output.dns["nameserver-policy"]), expected.map(([domain]) => domain).concat(domesticKeys));
   for (const [domain] of expected) {
     assert.deepEqual(output.dns["nameserver-policy"][domain], [
       "https://223.5.5.5/dns-query#DIRECT", "https://1.12.12.12/dns-query#DIRECT"
@@ -77,6 +78,22 @@ test("钉钉 DNS 与直连规则只覆盖指定域名，且优先于订阅代理
   assert.equal(output.dns["direct-nameserver-follow-policy"], true);
   assert.deepEqual(output.rules.slice(3, 9), expected.map(([, rule]) => rule));
   assert.deepEqual(output.rules.slice(9), input.rules);
+});
+test("淘宝网易仅增加国内加密 DNS，保留原有业务规则和默认代理 DNS", () => {
+  const input = base();
+  input.rules.unshift("DOMAIN-SUFFIX,taobao.com,DIRECT", "DOMAIN-SUFFIX,127.net,DIRECT");
+  const output = apply(input);
+  for (const domain of ["+.taobao.com", "+.163.com", "+.126.com", "+.127.net", "+.netease.com", "gw.alicdn.com"]) {
+    assert.deepEqual(output.dns["nameserver-policy"][domain], [
+      "https://223.5.5.5/dns-query#DIRECT", "https://1.12.12.12/dns-query#DIRECT"
+    ]);
+  }
+  for (const domain of ["+.cn", "+.alicdn.com", "+.aliyuncs.com", "nottaobao.com", "other.alicdn.com"]) {
+    assert.equal(output.dns["nameserver-policy"][domain], undefined);
+  }
+  assert.deepEqual(output.rules.slice(9), input.rules);
+  assert.deepEqual(output.dns.nameserver, output.dns["direct-nameserver"]);
+  assert.ok(output.dns.nameserver.every(endpoint => endpoint.endsWith("#sunshine-dns-break")));
 });
 test("可重复执行，组和前置拒绝规则不重复", () => {
   const first = apply(base());
@@ -180,7 +197,7 @@ async function query(port, qtype) {
     });
   } finally { socket.close(); }
 }
-test("隔离内核：钉钉按例外解析并直连，相似域名及其他 CDN 主机使用默认 DNS", { timeout: 15000 }, async () => {
+test("隔离内核：钉钉淘宝网易按例外解析，相似域名及其他 CDN 主机使用默认 DNS", { timeout: 15000 }, async () => {
   const domestic = createSocket("udp4");
   const ordinary = createSocket("udp4");
   const target = createHttpServer((_request, response) => response.end("direct fixture"));
@@ -220,7 +237,7 @@ test("隔离内核：钉钉按例外解析并直连，相似域名及其他 CDN 
       config.dns["nameserver-policy"][domain] = [`127.0.0.1:${domestic.address().port}`];
     }
     await runCore(config, async ({ api, logs }) => {
-      for (const [name, ip] of [["docs.dingtalk.com", "127.0.0.1"], ["g.alicdn.com", "127.0.0.1"], ["notdingtalk.com", "127.0.0.2"], ["other.alicdn.com", "127.0.0.2"]]) {
+      for (const [name, ip] of [["docs.dingtalk.com", "127.0.0.1"], ["g.alicdn.com", "127.0.0.1"], ["taobao.com", "127.0.0.1"], ["www.taobao.com", "127.0.0.1"], ["gw.alicdn.com", "127.0.0.1"], ["www.163.com", "127.0.0.1"], ["mail.126.com", "127.0.0.1"], ["necaptcha.nosdn.127.net", "127.0.0.1"], ["www.netease.com", "127.0.0.1"], ["nottaobao.com", "127.0.0.2"], ["notdingtalk.com", "127.0.0.2"], ["other.alicdn.com", "127.0.0.2"]]) {
         const result = await api(`/dns/query?name=${name}&type=A`);
         assert.ok(result.Answer.some(answer => answer.type === 1 && answer.data === ip));
         assert.equal(lookups.get(name), ip);
