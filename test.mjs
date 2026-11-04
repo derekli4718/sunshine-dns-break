@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
-import { readFileSync, mkdtempSync, writeFileSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { readFileSync, mkdtempSync, writeFileSync, rmSync, copyFileSync } from "node:fs";
+import { tmpdir, homedir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createContext, runInContext } from "node:vm";
@@ -18,6 +18,20 @@ function apply(config) {
   runInContext(source, context);
   return JSON.parse(JSON.stringify(context.main(JSON.parse(JSON.stringify(config)))));
 }
+const domesticRule = "RULE-SET,sunshine-cn-domains,DIRECT";
+function originalRules(output) {
+  return output.rules.slice(9).filter(rule => rule !== domesticRule && rule !== "GEOIP,CN,DIRECT");
+}
+function seedGeoIP(directory) {
+  const path = process.env.MIHOMO_MMDB || join(homedir(), "Library/Application Support/io.github.clash-verge-rev.clash-verge-rev/Country.mmdb");
+  copyFileSync(path, join(directory, "Country.mmdb")); // 本机公共地址库；测试不联网下载。
+}
+function fixtureRules(config) {
+  config["rule-providers"]["sunshine-cn-domains"] = {
+    type: "inline", behavior: "domain", payload: ["+.cnfixture.test"]
+  };
+  return config;
+}
 function base() {
   return {
     proxies: [{ name: "fixture-proxy", type: "socks5", server: "127.0.0.1", port: 1 }],
@@ -33,7 +47,7 @@ test("保留节点、原业务规则和应用管理的 TUN 设置；移除遗留
   const output = apply(input);
   assert.deepEqual(output.proxies, input.proxies);
   assert.deepEqual(output["proxy-groups"][0], input["proxy-groups"][0]);
-  assert.deepEqual(output.rules.slice(9), input.rules);
+  assert.deepEqual(originalRules(output), input.rules);
   assert.equal(output["mixed-port"], 7890);
   assert.equal(output.dns.fallback, undefined);
   assert.equal(output.dns["nameserver-policy"]["+.cn"], undefined);
@@ -68,7 +82,7 @@ test("钉钉 DNS 与直连规则只覆盖指定域名，且优先于订阅代理
     ["retcode.alicdn.com", "DOMAIN,retcode.alicdn.com,DIRECT"],
     ["alidocs-body.oss-cn-zhangjiakou.aliyuncs.com", "DOMAIN,alidocs-body.oss-cn-zhangjiakou.aliyuncs.com,DIRECT"]
   ];
-  const domesticKeys = ["+.taobao.com", "+.163.com", "+.126.com", "+.127.net", "+.netease.com", "gw.alicdn.com"];
+  const domesticKeys = ["+.taobao.com", "+.163.com", "+.126.com", "+.127.net", "+.netease.com", "gw.alicdn.com", "+.mastergo.com", "rule-set:sunshine-cn-domains"];
   assert.deepEqual(Object.keys(output.dns["nameserver-policy"]), expected.map(([domain]) => domain).concat(domesticKeys));
   for (const [domain] of expected) {
     assert.deepEqual(output.dns["nameserver-policy"][domain], [
@@ -77,7 +91,7 @@ test("钉钉 DNS 与直连规则只覆盖指定域名，且优先于订阅代理
   }
   assert.equal(output.dns["direct-nameserver-follow-policy"], true);
   assert.deepEqual(output.rules.slice(3, 9), expected.map(([, rule]) => rule));
-  assert.deepEqual(output.rules.slice(9), input.rules);
+  assert.deepEqual(originalRules(output), input.rules);
 });
 test("淘宝网易仅增加国内加密 DNS，保留原有业务规则和默认代理 DNS", () => {
   const input = base();
@@ -91,13 +105,42 @@ test("淘宝网易仅增加国内加密 DNS，保留原有业务规则和默认�
   for (const domain of ["+.cn", "+.alicdn.com", "+.aliyuncs.com", "nottaobao.com", "other.alicdn.com"]) {
     assert.equal(output.dns["nameserver-policy"][domain], undefined);
   }
-  assert.deepEqual(output.rules.slice(9), input.rules);
+  assert.deepEqual(originalRules(output), input.rules);
   assert.deepEqual(output.dns.nameserver, output.dns["direct-nameserver"]);
   assert.ok(output.dns.nameserver.every(endpoint => endpoint.endsWith("#sunshine-dns-break")));
+});
+test("国内规则库每日更新、DNS 与路由共用，明确规则保持优先且集合冲突报错", () => {
+  const input = base();
+  input.rules.unshift("DOMAIN,override.cnfixture.test,fixture-proxy");
+  input["rule-providers"] = { existing: { type: "inline", behavior: "domain", payload: ["+.example.org"] } };
+  const output = apply(input);
+  const provider = output["rule-providers"]["sunshine-cn-domains"];
+  assert.equal(provider.interval, 86400);
+  assert.equal(provider.proxy, "sunshine-dns-break");
+  assert.equal(provider.behavior, "domain");
+  assert.equal(provider.format, "mrs");
+  assert.match(provider.url, /^https:\/\/raw\.githubusercontent\.com\/MetaCubeX\/meta-rules-dat\/meta\/geo\/geosite\/cn\.mrs$/);
+  assert.deepEqual(output["rule-providers"].existing, input["rule-providers"].existing);
+  assert.ok(output.rules.indexOf(input.rules[0]) < output.rules.indexOf(domesticRule));
+  assert.ok(output.rules.indexOf(domesticRule) < output.rules.indexOf("MATCH,原订阅策略"));
+  assert.deepEqual(output.dns["nameserver-policy"]["rule-set:sunshine-cn-domains"], output.dns["default-nameserver"]);
+  assert.throws(() => apply({"rule-providers": {"sunshine-cn-domains": {type: "inline"}}}), /冲突/);
+});
+test("MasterGo 仅增加后缀 DNS 策略，保留已有直连及其他域名策略", () => {
+  const input = base();
+  input.rules.unshift("DOMAIN-KEYWORD,mastergo,DIRECT");
+  const output = apply(input);
+  assert.deepEqual(output.dns["nameserver-policy"]["+.mastergo.com"], [
+    "https://223.5.5.5/dns-query#DIRECT", "https://1.12.12.12/dns-query#DIRECT"
+  ]);
+  assert.deepEqual(originalRules(output), input.rules);
+  assert.equal(output.dns["nameserver-policy"]["+.aliyuncs.com"], undefined);
 });
 test("可重复执行，组和前置拒绝规则不重复", () => {
   const first = apply(base());
   assert.deepEqual(apply(first), first);
+  first["rule-providers"]["sunshine-cn-domains"] = Object.fromEntries(Object.entries(first["rule-providers"]["sunshine-cn-domains"]).reverse());
+  assert.deepEqual(apply(first), first); // YAML 重排键不应被误认为集合名称冲突。
   assert.equal(first["proxy-groups"].at(-1)["empty-fallback"], "REJECT");
   assert.equal(first["proxy-groups"].at(-1).proxies, undefined);
 });
@@ -112,6 +155,7 @@ test("保留集合订阅；没有节点时仍生成拒绝回退；保留名冲�
 test("本机 Mihomo 对普通/集合/空节点三种最终配置的解析检查", () => {
   const directory = mkdtempSync(join(tmpdir(), "dns-guard-check-"));
   try {
+    seedGeoIP(directory);
     const fixtures = [base(), {}, {
       "proxy-providers": { fixture: { type: "inline", payload: [
         { name: "unsafe-direct", type: "direct" },
@@ -121,7 +165,7 @@ test("本机 Mihomo 对普通/集合/空节点三种最终配置的解析检查"
     }];
     for (const [index, fixture] of fixtures.entries()) {
       const path = join(directory, `fixture-${index}.json`);
-      writeFileSync(path, JSON.stringify(apply(fixture)));
+      writeFileSync(path, JSON.stringify(fixtureRules(apply(fixture))));
       const result = spawnSync(core, ["-t", "-d", directory, "-f", path], { encoding: "utf8", timeout: 15000 });
       assert.equal(result.status, 0, result.stdout + result.stderr + String(result.error || ""));
     }
@@ -144,8 +188,10 @@ async function udpPort() {
 }
 async function runCore(config, callback) {
   const directory = mkdtempSync(join(tmpdir(), "dns-guard-runtime-"));
+  seedGeoIP(directory);
   const port = await tcpPort();
   const dnsPort = await udpPort();
+  fixtureRules(config);
   config.tun = { ...config.tun, enable: false }; // 测试夹具：绝不创建 TUN 或更改系统路由。
   config.dns.listen = `127.0.0.1:${dnsPort}`;
   config["external-controller"] = `127.0.0.1:${port}`;
@@ -237,13 +283,14 @@ test("隔离内核：钉钉淘宝网易按例外解析，相似域名及其他 C
       config.dns["nameserver-policy"][domain] = [`127.0.0.1:${domestic.address().port}`];
     }
     await runCore(config, async ({ api, logs }) => {
-      for (const [name, ip] of [["docs.dingtalk.com", "127.0.0.1"], ["g.alicdn.com", "127.0.0.1"], ["taobao.com", "127.0.0.1"], ["www.taobao.com", "127.0.0.1"], ["gw.alicdn.com", "127.0.0.1"], ["www.163.com", "127.0.0.1"], ["mail.126.com", "127.0.0.1"], ["necaptcha.nosdn.127.net", "127.0.0.1"], ["www.netease.com", "127.0.0.1"], ["nottaobao.com", "127.0.0.2"], ["notdingtalk.com", "127.0.0.2"], ["other.alicdn.com", "127.0.0.2"]]) {
+      for (const [name, ip] of [["docs.dingtalk.com", "127.0.0.1"], ["g.alicdn.com", "127.0.0.1"], ["taobao.com", "127.0.0.1"], ["www.taobao.com", "127.0.0.1"], ["gw.alicdn.com", "127.0.0.1"], ["www.163.com", "127.0.0.1"], ["mail.126.com", "127.0.0.1"], ["necaptcha.nosdn.127.net", "127.0.0.1"], ["www.netease.com", "127.0.0.1"], ["mastergo.com", "127.0.0.1"], ["static.mastergo.com", "127.0.0.1"], ["news.cnfixture.test", "127.0.0.1"], ["notcnfixture.test", "127.0.0.2"], ["notmastergo.com", "127.0.0.2"], ["nottaobao.com", "127.0.0.2"], ["notdingtalk.com", "127.0.0.2"], ["other.alicdn.com", "127.0.0.2"]]) {
         const result = await api(`/dns/query?name=${name}&type=A`);
         assert.ok(result.Answer.some(answer => answer.type === 1 && answer.data === ip));
         assert.equal(lookups.get(name), ip);
       }
+      for (const host of ["docs.dingtalk.com", "news.cnfixture.test"]) {
       const body = await new Promise((resolve, reject) => {
-        const request = get({ hostname: "127.0.0.1", port: config["mixed-port"], path: `http://docs.dingtalk.com:${target.address().port}/`, headers: { Host: `docs.dingtalk.com:${target.address().port}` }, agent: false }, response => {
+        const request = get({ hostname: "127.0.0.1", port: config["mixed-port"], path: `http://${host}:${target.address().port}/`, headers: { Host: `${host}:${target.address().port}` }, agent: false }, response => {
           let text = "";
           response.on("data", chunk => { text += chunk; });
           response.on("end", () => resolve({ text, status: response.statusCode }));
@@ -253,6 +300,7 @@ test("隔离内核：钉钉淘宝网易按例外解析，相似域名及其他 C
       });
       assert.equal(body.status, 200, logs());
       assert.equal(body.text, "direct fixture"); // Blanket proxy rule points to closed port 1.
+      }
     });
   } finally {
     domestic.close();
