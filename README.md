@@ -1,6 +1,6 @@
 # sunshine dns break
 
-适用于 Clash Verge Rev 的全局扩展脚本，国内域名规则库与指定例外使用国内加密 DNS，其他域名的加密 DNS 固定经过独立代理组；同一份国内域名规则库为直连提供兜底，保留订阅明确的业务规则。
+适用于 Clash Verge Rev 的全局扩展脚本，国内域名规则库、指定例外及实际直连出口使用国内加密 DNS，默认代理解析经过独立代理组；同一份国内域名规则库为直连提供兜底，保留订阅明确的业务规则。
 
 已在 macOS arm64、Clash Verge Rev 2.5.8、2.5.9 / Mihomo 1.19.32 上检查。
 
@@ -22,16 +22,19 @@
 | 查询 | 使用的上游 | 网络出口 |
 |---|---|---|
 | 国内域名规则库命中的域名、明确例外 | 阿里 `223.5.5.5`、腾讯 `1.12.12.12` 的 DoH | 直连、TLS 校验证书 |
-| 其他域名，包括未命中规则库的直连域名 | Cloudflare `1.1.1.1`、Google `8.8.4.4` 的 DoH | 固定经过 `sunshine-dns-break` |
+| 已由订阅明确规则或国内 IP 规则判定为 DIRECT 的连接 | 阿里／腾讯的 DoH | 直连、TLS 校验证书 |
+| 默认查询及代理出口的解析 | Cloudflare `1.1.1.1`、Google `8.8.4.4` 的 DoH | 固定经过 `sunshine-dns-break` |
 | 代理节点域名及内核引导请求 | 阿里／腾讯 IP 地址 DoH | 直连、TLS 校验证书 |
 
 ### 统一国内分流
 
-`sunshine-cn-domains` 使用 MetaCubeX/meta-rules-dat 的 `cn.mrs` 国内域名集合。内核通过 sunshine-dns-break 组下载规则数据，每 86400 秒检查更新并使用本地缓存；脚本不执行下载的数据或远程 JavaScript。首次使用需成功下载规则库，已有缓存时更新失败可继续使用缓存；规则库可能遗漏或误分类，不能保证永不需要例外。
+`sunshine-cn-domains` 使用 MetaCubeX/meta-rules-dat 的 `geolocation-cn.mrs` 国内域名集合。内核通过 sunshine-dns-break 组下载规则数据，每 86400 秒检查更新并使用本地缓存；脚本不执行下载的数据或远程 JavaScript。首次使用需成功下载规则库，已有缓存时更新失败可继续使用缓存；规则库可能遗漏或误分类，不能保证永不需要例外。
+
+使用范围较保守的 `geolocation-cn`，避免广义 `cn` 集合将 BrowserLeaks 等境外网站判为国内直连；旧版定义自动迁移并更换缓存路径，不再复用旧集合。分类仍可能随上游更新变化。
 
 同一个集合同时出现在 `nameserver-policy` 和路由规则里：国内解析用国内 HTTPS DoH，国内连接在地域及最终兜底前使用 DIRECT。订阅中明确的域名、应用规则保持优先级；既有 `GEOIP,CN` 保留，无该规则的订阅补充国内 IP 直连兜底。国内应用调用的海外服务仍按实际域名匹配，不按整个应用强制直连。
 
-国内 DNS 服务商能够看到匹配域名的查询和本地公网出口，HTTPS 保护传输过程，并不隐藏查询内容于解析服务商。其余域名仍走原代理 DNS，代理不可用时不增加直连回退。使用规则库意味着信任其维护方对域名的分类；需要特殊出口的域名应使用高优先级明确规则。
+国内 DNS 服务商能够看到国内集合、明确例外及实际 DIRECT 出口域名的查询和本地公网出口，HTTPS 保护传输过程，并不隐藏查询内容于解析服务商。默认解析和代理出口仍走原代理 DNS；实际 DIRECT 连接会使用国内 DoH，代理出口不增加直连 DNS 回退。使用规则库意味着信任其维护方对域名的分类；需要特殊出口的域名应使用高优先级明确规则。
 
 国内加密 DNS 例外范围：
 
@@ -44,11 +47,11 @@
 | `gw.alicdn.com` | 仅此淘宝图标跳转主机 |
 | `mastergo.com` | 域名自身及子域名（含 static.mastergo.com），沿用原业务分流 |
 
-钉钉及其指定资源域名同时添加优先的 `DIRECT` 规则。淘宝、网易及 `gw.alicdn.com` 仅增加 DNS 策略，沿用订阅中的业务规则；本机订阅将这些流量直连。保留的明确例外不扩大到整个 `alicdn.com` 或 `aliyuncs.com`；国内规则库独立决定其覆盖范围，其他域名保留原业务分流及默认代理 DNS。国内 DNS 服务商可以看到上述例外域名的查询和本地公网出口；查询使用 HTTPS 并校验证书。这是明确的加密直连例外，并非代理故障后的回退。
+钉钉及其指定资源域名同时添加优先的 `DIRECT` 规则。淘宝、网易及 `gw.alicdn.com` 仅增加 DNS 策略，沿用订阅中的业务规则；本机订阅将这些流量直连。保留的明确例外不扩大到整个 `alicdn.com` 或 `aliyuncs.com`；国内规则库独立决定其覆盖范围，其他域名保留原业务分流，DNS 按上述解析路径处理。国内 DNS 服务商可以看到上述例外域名的查询和本地公网出口；查询使用 HTTPS 并校验证书。这是明确的加密直连例外，并非代理故障后的回退。
 
 节点域名需要先解析才能连接节点，因此这里有明确的加密直连例外。引导 DNS 服务商可以看到节点域名及本地公网出口；部分内核自身下载（例如集合下载）也可能使用这个解析器。它不是全部浏览域名的解析出口。若要求连节点域名也不对引导解析器暴露，需要可信的节点 IP 配置并保持正确 SNI/证书，不能靠循环使用尚未连接的代理解决。
 
-非例外域名解析不设置直连 fallback；sunshine-dns-break 节点不可用时，这些查询失败，不自动切到本地 DNS。已有缓存或 Fake-IP 响应可能仍返回，因此“暂时能打开页面”不能证明发生了 DNS 回退。空节点集合显式回退 REJECT，避免内核默认的 COMPATIBLE 直连行为。
+默认代理解析不设置直连 fallback；sunshine-dns-break 节点不可用时，需要经过该组的上游查询失败，不自动切到本地 DNS。国内集合、明确例外及实际 DIRECT 出口使用国内加密 DNS。已有缓存或 Fake-IP 响应可能仍返回，因此“暂时能打开页面”不能证明发生了 DNS 回退。空节点集合显式回退 REJECT，避免内核默认的 COMPATIBLE 直连行为。
 
 ## 最终配置检查
 
@@ -58,8 +61,8 @@ rule-providers:
     type: http
     behavior: domain
     format: mrs
-    url: https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/geosite/cn.mrs
-    path: ./ruleset/sunshine-cn-domains.mrs
+    url: https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/geosite/geolocation-cn.mrs
+    path: ./ruleset/sunshine-cn-geolocation.mrs
     interval: 86400
     proxy: sunshine-dns-break
 dns:
@@ -70,8 +73,8 @@ dns:
     - https://1.1.1.1/dns-query#sunshine-dns-break
     - https://8.8.4.4/dns-query#sunshine-dns-break
   direct-nameserver:
-    - https://1.1.1.1/dns-query#sunshine-dns-break
-    - https://8.8.4.4/dns-query#sunshine-dns-break
+    - https://223.5.5.5/dns-query#DIRECT
+    - https://1.12.12.12/dns-query#DIRECT
   direct-nameserver-follow-policy: true
   nameserver-policy:
     "+.dingtalk.com": &domestic-doh
@@ -99,7 +102,7 @@ tun:
     - tcp://any:53
 ```
 
-sunshine-dns-break 的 `include-all` 必须为 true，`empty-fallback` 必须为 REJECT，`exclude-type` 必须包含 Direct、Compatible、Pass 等非代理类型；没有订阅节点时组里只能出现 REJECT。普通 DNS 不应出现 `system`、无加密的上游或直连 fallback；`nameserver-policy` 包含上述十三个例外及 `rule-set:sunshine-cn-domains`。`direct-nameserver-follow-policy: true` 确保直连流量采用这些例外，未命中国内集合或例外的直连域名仍使用原代理 DoH。原有业务分流规则保留，前面依次增加 53/853 端口及 IPv6 拒绝规则、钉钉直连规则，国内集合在 GEOIP,CN 或 MATCH 前匹配。
+sunshine-dns-break 的 `include-all` 必须为 true，`empty-fallback` 必须为 REJECT，`exclude-type` 必须包含 Direct、Compatible、Pass 等非代理类型；没有订阅节点时组里只能出现 REJECT。普通 DNS 不应出现 `system`、无加密的上游或直连 fallback；`nameserver-policy` 包含上述十三个例外及 `rule-set:sunshine-cn-domains`。`direct-nameserver-follow-policy: true` 确保直连流量采用这些例外，未命中国内集合或例外但实际走 DIRECT 的域名也使用国内 DoH。原有业务分流规则保留，前面依次增加 53/853 端口及 IPv6 拒绝规则、钉钉直连规则，国内集合在 GEOIP,CN 或 MATCH 前匹配。
 
 Verge 2.5.8 的应用设置优先级高于扩展脚本，TUN 开关、保存过的 TUN 设置、IPv6 等字段可能被回写。当前脚本不写入 TUN 字段，避免与应用设置冲突；上面的 TUN 片段是客户端配置完成后应检查的最终值，不是脚本自动写入的内容。DNS 覆写通常在脚本前合并，无需为了此脚本专门打开；但其 IPv6 选项及后续订阅扩展仍应检查。
 
@@ -129,7 +132,7 @@ sudo tcpdump -ni <实际网卡> '(udp port 53 or tcp port 53 or port 853)'
 - 在内核已接管的流量中，53 端口剩余流量拒绝、853 端口拒绝；任意 HTTPS 443 流量无法仅凭端口区分 DoH 和普通网页，所以要求关闭浏览器独立安全 DNS。脚本不声称拦截所有第三方应用自带 DoH。
 - 关闭客户端 IPv6 仅影响 Mihomo。脚本另加 IPv6 拒绝规则，但不会关闭 macOS 系统 IPv6；需要严格 IPv6 防泄漏时应在系统层处理并验证路由。
 - 不新增局域网/企业域名明文 DNS 例外；`.lan`、`.local` 的 fake-ip-filter 只决定是否返回真实地址，不表示查询会直连。企业内网域名、部分设备发现和门户认证可能需要单独设计受控例外。
-- 除国内域名集合及明确例外外，普通 DNS 经过境外代理，国内 CDN 定位可能变化、延迟可能增加；节点断开时新域名解析可能失败。这些例外用于避免国内直连访问被境外 DNS 调度到海外入口。规则库未覆盖的国内网站若出现同类问题，应先核实实际域名、DNS 及分流，不能仅凭检测站的“国内”标签推断出口。
+- 国内集合、明确例外及实际 DIRECT 连接采用国内加密 DNS，以改善国内 CDN 调度；默认解析及代理出口经过境外代理 DNS。规则匹配前的查询仍可能使用默认解析，节点断开时这类新查询可能失败。国内网站若出现问题，应先核实实际域名、DNS 及分流，不能仅凭检测站的“国内”标签推断出口。
 - 脚本保留原有节点和非例外域名的业务分流，不会把原有国内直连改成全量代理，仅新增上述国内域名规则集合，不修改其他已有规则集合。保留名称 `sunshine-dns-break` 由脚本管理；不要用于其他策略组、节点或集合。其他订阅/节点本身仍需可信。
 
 ## 检查依据
@@ -139,4 +142,4 @@ sudo tcpdump -ni <实际网卡> '(udp port 53 or tcp port 53 or port 853)'
 - Mihomo TUN 的系统差异：https://wiki.metacubex.one/config/inbound/tun/
 - v1.19.32 代理组类型过滤及空组行为：https://github.com/MetaCubeX/mihomo/blob/v1.19.32/adapter/outboundgroup/groupbase.go
 
-自动验证及其边界见 [VALIDATION.md](VALIDATION.md)。测试文件为 [test.mjs](test.mjs)，无第三方 JavaScript 包依赖；测试需要本机公共 Country.mmdb，其他位置可用 MIHOMO_MMDB 指定。
+自动验证及其边界见 [VALIDATION.md](VALIDATION.md)。测试文件为 [test.mjs](test.mjs)，无第三方 JavaScript 包依赖；测试需要本机公共 Country.mmdb，其他位置可用 MIHOMO_MMDB 指定。真实规则库回归需设置 `MIHOMO_DOMESTIC_RULESET=/path/to/geolocation-cn.mrs node --test test.mjs`；未设置时会跳过该项，其余测试使用隔离夹具。

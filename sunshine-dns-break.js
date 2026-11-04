@@ -62,18 +62,24 @@ function main(config) {
     type: "http",
     behavior: "domain",
     format: "mrs",
-    url: "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/geosite/cn.mrs",
-    path: "./ruleset/sunshine-cn-domains.mrs",
+    url: "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/geosite/geolocation-cn.mrs",
+    path: "./ruleset/sunshine-cn-geolocation.mrs",
     interval: 86400,
     proxy: groupName
   };
   const ruleProviders = config["rule-providers"] || {};
+  const existingProvider = ruleProviders[domesticProviderName];
+  // 只迁移本脚本旧版生成的定义；换缓存路径，防止旧 cn 广义集合继续命中。
+  const legacyProvider = Object.assign({}, domesticProvider, {
+    url: "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/geosite/cn.mrs",
+    path: "./ruleset/sunshine-cn-domains.mrs"
+  });
+  function sameProvider(expected) {
+    return existingProvider && Object.keys(existingProvider).length === Object.keys(expected).length &&
+      Object.keys(expected).every(function (key) { return existingProvider[key] === expected[key]; });
+  }
   if (Object.prototype.hasOwnProperty.call(ruleProviders, domesticProviderName) &&
-      (!ruleProviders[domesticProviderName] ||
-       Object.keys(ruleProviders[domesticProviderName]).length !== Object.keys(domesticProvider).length ||
-       Object.keys(domesticProvider).some(function (key) {
-         return ruleProviders[domesticProviderName][key] !== domesticProvider[key];
-       }))) {
+      !sameProvider(domesticProvider) && !sameProvider(legacyProvider)) {
     throw new Error("sunshine dns break：规则集合保留名称 sunshine-cn-domains 冲突。");
   }
   config["rule-providers"] = Object.assign({}, ruleProviders);
@@ -100,7 +106,7 @@ function main(config) {
   dingTalkPolicy["+.mastergo.com"] = bootstrap.slice();
   dingTalkPolicy["rule-set:" + domesticProviderName] = bootstrap.slice();
 
-  // 整体重建：国内集合与明确例外走国内 DoH，其他查询保持代理防护。
+  // 国内集合、明确例外及实际 DIRECT 出口使用国内 DoH；代理出口保持境外 DoH。
   // DNS URL 的显式 #策略优先于业务分流，不受国内网站 DIRECT 规则影响。
   config.dns = {
     enable: true,
@@ -118,7 +124,7 @@ function main(config) {
     "default-nameserver": bootstrap.slice(),
     "proxy-server-nameserver": bootstrap.slice(),
     nameserver: viaProxy.slice(),
-    "direct-nameserver": viaProxy.slice(),
+    "direct-nameserver": bootstrap.slice(),
     "nameserver-policy": dingTalkPolicy,
     "direct-nameserver-follow-policy": true
   };

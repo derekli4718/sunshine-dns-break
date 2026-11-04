@@ -53,14 +53,14 @@ test("保留节点、原业务规则和应用管理的 TUN 设置；移除遗留
   assert.equal(output.dns["nameserver-policy"]["+.cn"], undefined);
   assert.deepEqual(output.tun, input.tun);
 });
-test("普通与直连出口的解析显式走代理；引导解析仅使用 IP 地址加密 DoH", () => {
+test("默认代理 DNS 与实际直连 DNS 分开；全部上游使用校验证书的 HTTPS", () => {
   const output = apply(base());
-  for (const key of ["nameserver", "direct-nameserver"]) {
+  for (const key of ["nameserver"]) {
     for (const endpoint of output.dns[key]) {
       assert.match(endpoint, /^https:\/\/[\d.]+\/dns-query#sunshine-dns-break$/);
     }
   }
-  for (const key of ["default-nameserver", "proxy-server-nameserver"]) {
+  for (const key of ["default-nameserver", "proxy-server-nameserver", "direct-nameserver"]) {
     for (const endpoint of output.dns[key]) {
       assert.match(endpoint, /^https:\/\/[\d.]+\/dns-query#DIRECT$/);
       assert.ok(!endpoint.includes("skip-cert-verify"));
@@ -106,7 +106,7 @@ test("淘宝网易仅增加国内加密 DNS，保留原有业务规则和默认�
     assert.equal(output.dns["nameserver-policy"][domain], undefined);
   }
   assert.deepEqual(originalRules(output), input.rules);
-  assert.deepEqual(output.dns.nameserver, output.dns["direct-nameserver"]);
+  assert.deepEqual(output.dns["default-nameserver"], output.dns["direct-nameserver"]);
   assert.ok(output.dns.nameserver.every(endpoint => endpoint.endsWith("#sunshine-dns-break")));
 });
 test("国内规则库每日更新、DNS 与路由共用，明确规则保持优先且集合冲突报错", () => {
@@ -119,7 +119,12 @@ test("国内规则库每日更新、DNS 与路由共用，明确规则保持优�
   assert.equal(provider.proxy, "sunshine-dns-break");
   assert.equal(provider.behavior, "domain");
   assert.equal(provider.format, "mrs");
-  assert.match(provider.url, /^https:\/\/raw\.githubusercontent\.com\/MetaCubeX\/meta-rules-dat\/meta\/geo\/geosite\/cn\.mrs$/);
+  assert.equal(provider.path, "./ruleset/sunshine-cn-geolocation.mrs");
+  const legacy = structuredClone(output);
+  legacy["rule-providers"]["sunshine-cn-domains"].url = provider.url.replace("geolocation-cn.mrs", "cn.mrs");
+  legacy["rule-providers"]["sunshine-cn-domains"].path = "./ruleset/sunshine-cn-domains.mrs";
+  assert.deepEqual(apply(legacy), output);
+  assert.match(provider.url, /^https:\/\/raw\.githubusercontent\.com\/MetaCubeX\/meta-rules-dat\/meta\/geo\/geosite\/geolocation-cn\.mrs$/);
   assert.deepEqual(output["rule-providers"].existing, input["rule-providers"].existing);
   assert.ok(output.rules.indexOf(input.rules[0]) < output.rules.indexOf(domesticRule));
   assert.ok(output.rules.indexOf(domesticRule) < output.rules.indexOf("MATCH,原订阅策略"));
@@ -186,12 +191,16 @@ async function udpPort() {
   socket.close();
   return port;
 }
-async function runCore(config, callback) {
+async function runCore(config, callback, rulesetPath) {
   const directory = mkdtempSync(join(tmpdir(), "dns-guard-runtime-"));
   seedGeoIP(directory);
   const port = await tcpPort();
   const dnsPort = await udpPort();
-  fixtureRules(config);
+  if (rulesetPath) {
+    const localRuleset = join(directory, "domestic.mrs");
+    copyFileSync(rulesetPath, localRuleset);
+    config["rule-providers"]["sunshine-cn-domains"] = { type: "file", behavior: "domain", format: "mrs", path: localRuleset };
+  } else { fixtureRules(config); }
   config.tun = { ...config.tun, enable: false }; // 测试夹具：绝不创建 TUN 或更改系统路由。
   config.dns.listen = `127.0.0.1:${dnsPort}`;
   config["external-controller"] = `127.0.0.1:${port}`;
@@ -371,4 +380,47 @@ test("隔离内核：只有直连节点时 DNS 组回退 REJECT，不能回退 C
     assert.deepEqual(group.all, ["REJECT"]);
     assert.equal(group.now, "REJECT");
   });
+});
+
+
+test("真实国内 MRS：海外检测站不匹配，国内域名匹配并直连", { skip: !process.env.MIHOMO_DOMESTIC_RULESET, timeout: 15000 }, async () => {
+  const domestic = createSocket("udp4"), ordinary = createSocket("udp4");
+  const target = createHttpServer((_req, res) => res.end("domestic route"));
+  for (const [server, ip] of [[domestic, 1], [ordinary, 2]]) {
+    server.on("message", (packet, peer) => {
+      let offset = 12;
+      while (packet[offset]) offset += packet[offset] + 1;
+      const qtype = packet.readUInt16BE(offset + 1);
+      const header = Buffer.from(packet.subarray(0, 12));
+      header.writeUInt16BE(0x8180, 2); header.writeUInt16BE(qtype === 1 ? 1 : 0, 6);
+      const record = Buffer.from([0xc0, 0x0c, 0, 1, 0, 1, 0, 0, 0, 30, 0, 4, 127, 0, 0, ip]);
+      server.send(Buffer.concat([header, packet.subarray(12, offset + 5), ...(qtype === 1 ? [record] : [])]), peer.port, peer.address);
+    });
+  }
+  try {
+    await new Promise(r => domestic.bind(0, "127.0.0.1", r));
+    await new Promise(r => ordinary.bind(0, "127.0.0.1", r));
+    await new Promise(r => target.listen(0, "127.0.0.1", r));
+    const config = apply({ ...base(), rules: ["MATCH,fixture-proxy"] });
+    config["mixed-port"] = await tcpPort();
+    config.dns.nameserver = config.dns["direct-nameserver"] = [`127.0.0.1:${ordinary.address().port}`];
+    for (const key of Object.keys(config.dns["nameserver-policy"])) config.dns["nameserver-policy"][key] = [`127.0.0.1:${domestic.address().port}`];
+    await runCore(config, async ({api}) => {
+      for (const host of ["browserleaks.com", "www.browserleaks.com", "dnsleaktest.com", "ipleak.net", "google.com", "github.com", "cloudflare.com", "chatgpt.com", "claude.ai"]) {
+        const result = await api(`/dns/query?name=${host}&type=A`);
+        assert.ok(result.Answer.some(a => a.type === 1 && a.data === "127.0.0.2"), host);
+      }
+      const result = await api("/dns/query?name=www.baidu.com&type=A");
+      assert.ok(result.Answer.some(a => a.type === 1 && a.data === "127.0.0.1"));
+      const body = await new Promise((resolve, reject) => {
+        const req = get({ hostname: "127.0.0.1", port: config["mixed-port"], path: `http://www.baidu.com:${target.address().port}/`, headers: {Host: `www.baidu.com:${target.address().port}`}, agent: false }, res => {
+          let body = ""; res.on("data", c => body += c); res.on("end", () => resolve({code:res.statusCode, body}));
+        });
+        req.setTimeout(3000, () => req.destroy(new Error("domestic route timeout"))); req.on("error", reject);
+      });
+      assert.deepEqual(body, {code:200, body:"domestic route"});
+    }, process.env.MIHOMO_DOMESTIC_RULESET);
+  } finally {
+    domestic.close(); ordinary.close(); await new Promise(r => target.close(r));
+  }
 });

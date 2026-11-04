@@ -51,6 +51,17 @@
 - QQ 首页对命令行请求返回 HTTP 501，已收到服务器响应；本次未验证该网页的浏览器业务功能。没有验证所有国内网站、完整设计文件渲染或长期稳定性。24 小时周期为配置值，不代表已经等待一个完整更新周期；手动更新 API 返回 204，updatedAt 从 17:12:02 推进至 17:13:43，集合仍为 110177 条。
 - 修改前全局脚本、生成配置及策略组选择已保存在本机 clash-verge-rev-backup/unified-cn-* 私有目录，便于回滚。
 
+## BrowserLeaks 回归修复（2026-11-04）
+
+- 统一优化使用的广义 cn 集合包含 `+.browserleaks.com`。故障时实际连接命中 `RuleSet/sunshine-cn-domains` 并走 DIRECT，证实存在误分类；不能将此现象仅归因于 DNS 或节点故障。
+- 更换为范围较保守的 geolocation-cn.mrs，并换用 `./ruleset/sunshine-cn-geolocation.mrs` 缓存路径，避免加载旧集合；运行内核确认加载 5421 条记录。仅允许自动迁移本脚本准确的旧 provider 定义，同名第三方定义仍拒绝覆盖。
+- 实际 DIRECT 出口的 direct-nameserver 改为阿里／腾讯 HTTPS DoH，保留 policy 优先；默认 nameserver 仍为经 sunshine-dns-break 的 Cloudflare／Google DoH。既有业务规则、节点、策略组、TUN 及手动选择保持不变。
+- 使用真实下载的 MRS 执行 `MIHOMO_DOMESTIC_RULESET=/tmp/sunshine-geolocation-cn.mrs node --test test.mjs`，13 项全部通过、无跳过。真实集合测试确认 BrowserLeaks、DNSLeakTest、IPLeak、Google、GitHub、Cloudflare、ChatGPT、Claude 不匹配国内集合，百度匹配并通过 DIRECT 到达隔离 HTTP 目标。测试上游为本地模拟 DNS，发布配置使用 HTTPS。
+- 完整候选通过内核 -t，客户端重新激活订阅后生成配置与候选语义一致，持久化全局脚本已更新并保留修改前备份。
+- 经本机 127.0.0.1:7897 正常入口请求 BrowserLeaks /dns：HTTP 200 / 1.93 秒；DNS 检测脚本 HTTP 200 / 1.08 秒。实际连接命中 Match，经漏网之鱼／节点选择使用美国 01，未再命中国内集合。
+- 在用户现有 Chrome 标签页刷新，DNS Leak Test 页面成功显示并完成检测：网页出口美国洛杉矶，本次检测发现 59 个 Google／Cloudflare 递归 DNS 出口，位置为美国及澳大利亚。这是当次浏览器结果，不代表系统层零泄漏证明。
+- 同期复测：MasterGo 核心 5,050,196 字节 HTTP 200 / 3.80 秒，钉钉 HTTP 200 / 0.15 秒，Google generate_204 HTTP 204 / 0.98 秒。以上为当次测量，未验证全部网站或长期稳定性。
+
 ## 复现
 
 ```sh
